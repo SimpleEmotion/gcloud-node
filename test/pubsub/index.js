@@ -16,6 +16,7 @@
 
 'use strict';
 
+var arrify = require('arrify');
 var assert = require('assert');
 var mockery = require('mockery');
 var request = require('request');
@@ -29,15 +30,29 @@ function Subscription(a, b) {
   return new OverrideFn(a, b);
 }
 
-var request_Cached = request;
-var request_Override;
+var requestCached = request;
+var requestOverride;
 function fakeRequest() {
-  return (request_Override || request_Cached).apply(null, arguments);
+  return (requestOverride || requestCached).apply(null, arguments);
 }
 fakeRequest.defaults = function() {
   // Ignore the default values, so we don't have to test for them in every API
   // call.
   return fakeRequest;
+};
+
+var extended = false;
+var fakeStreamRouter = {
+  extend: function(Class, methods) {
+    if (Class.name !== 'PubSub') {
+      return;
+    }
+
+    methods = arrify(methods);
+    assert.equal(Class.name, 'PubSub');
+    assert.deepEqual(methods, ['getSubscriptions', 'getTopics']);
+    extended = true;
+  }
 };
 
 describe('PubSub', function() {
@@ -46,6 +61,7 @@ describe('PubSub', function() {
   var pubsub;
 
   before(function() {
+    mockery.registerMock('../common/stream-router.js', fakeStreamRouter);
     mockery.registerMock('./subscription.js', Subscription);
     mockery.registerMock('./topic.js', Topic);
     mockery.registerMock('request', fakeRequest);
@@ -63,7 +79,7 @@ describe('PubSub', function() {
 
   beforeEach(function() {
     SubscriptionOverride = null;
-    request_Override = null;
+    requestOverride = null;
     pubsub = new PubSub({ projectId: PROJECT_ID });
     pubsub.makeReq_ = function(method, path, q, body, callback) {
       callback();
@@ -71,6 +87,10 @@ describe('PubSub', function() {
   });
 
   describe('instantiation', function() {
+    it('should extend the correct methods', function() {
+      assert(extended); // See `fakeStreamRouter.extend`
+    });
+
     it('should throw if a projectId is not specified', function() {
       assert.throws(function() {
         new PubSub();
@@ -79,9 +99,12 @@ describe('PubSub', function() {
   });
 
   describe('getTopics', function() {
+    var topicName = 'fake-topic';
+    var apiResponse = { topics: [{ name: topicName }]};
+
     beforeEach(function() {
       pubsub.makeReq_ = function(method, path, q, body, callback) {
-        callback(null, { topics: [{ name: 'fake-topic' }] });
+        callback(null, apiResponse);
       };
     });
 
@@ -101,10 +124,19 @@ describe('PubSub', function() {
       pubsub.getTopics(function() {});
     });
 
-    it('should return Topic instances', function() {
+    it('should return Topic instances with metadata', function(done) {
+      var topic = {};
+
+      pubsub.topic = function(name) {
+        assert.strictEqual(name, topicName);
+        return topic;
+      };
+
       pubsub.getTopics(function(err, topics) {
         assert.ifError(err);
-        assert(topics[0] instanceof Topic);
+        assert.strictEqual(topics[0], topic);
+        assert.strictEqual(topics[0].metadata, apiResponse.topics[0]);
+        done();
       });
     });
 
@@ -217,7 +249,7 @@ describe('PubSub', function() {
         'projects/' + PROJECT_ID + '/topics/' + TOPIC_NAME + '/subscriptions';
 
       before(function() {
-        TOPIC = new Topic(pubsub, { name: TOPIC_NAME });
+        TOPIC = new Topic(pubsub, TOPIC_NAME);
       });
 
       it('should subscribe to a topic by string', function(done) {

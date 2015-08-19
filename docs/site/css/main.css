@@ -428,6 +428,11 @@ ul {
         transition: all 0.3s ease;
 }
 
+.language-switcher--home .menu {
+    position: absolute;
+    bottom: initial;
+}
+
 .page-header.fixed .menu {
     top: 3.3em;
 }
@@ -856,15 +861,25 @@ ul {
   padding-top: 0.7em;
 }
 
-.param-optional .param-types {
+.param-optional .param-types,
+.param-nullable .param-types {
   font-style: italic;
+}
+
+.param-optional .param-types:after,
+.param-nullable .param-types:after {
+  display: block;
+  color: #aaa;
+  font-style: italic;
+  font-size: 85%;
 }
 
 .param-optional .param-types:after {
   content: " (optional)";
-  color: #aaa;
-  font-style: italic;
-  font-size: 85%;
+}
+
+.param-nullable .param-types:after {
+  content: " (may be null)";
 }
 
 .method-heading {
@@ -916,6 +931,12 @@ ul {
 .view-code-link > a {
   font-size: 80%;
   color: #888;
+}
+
+.resource-links {
+  margin: 0;
+  padding: 8px;
+  background-color: #f5f8ff;
 }
 
 /*
@@ -1415,6 +1436,10 @@ ul {
     /*
      Menu
      */
+    .menu {
+        position: absolute;
+    }
+
     .main-nav {
         position: absolute;
         top: 1.2em;

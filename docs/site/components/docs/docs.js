@@ -42,7 +42,7 @@ angular
           .replace(/(<div[^>]*>)\n+/g, '$1\n')
           .replace(/\n<\/div>/g, '</div>');
         function wrapCode(code) {
-          return '<div hljs language="javascript">\n' + code + '</div>';
+          return '<div hljs no-escape language="javascript">\n' + code + '</div>';
         }
       }
       function detectLinks(str) {
@@ -110,16 +110,26 @@ angular
           'bucket',
           'file',
           'job',
-          'table'
+          'table',
+          'index',
+          'document',
+          'field',
+          'topic',
+          'subscription'
         ];
-        type = type.replace('=', '');
+
+        var arrayRegex = /Array\.<([^>]+)>/g;
+        type = type.replace('=', '')
+          .replace('?', '')
+          .replace(arrayRegex, '$1[]');
+
         if (CUSTOM_TYPES.indexOf(type.toLowerCase()) > -1) {
           if (types[index - 1]) {
             type = types[index - 1] + '/' + type;
             delete types[index - 1];
           }
         }
-        acc.push(detectModules(type));
+        acc.push(detectModules(type).replace('[]', ''));
         return acc;
       }
       return function(data) {
@@ -174,7 +184,13 @@ angular
                 })
                 .map(function(tag) {
                   return $sce.trustAsHtml(formatComments(tag.string));
-                })[0]
+                })[0],
+              docs: obj.tags.filter(function(tag) {
+                  return tag.type === 'resource'
+                })
+                .map(function(tag) {
+                  return $sce.trustAsHtml(formatHtml(detectLinks(tag.string)));
+                })
             };
           })
           .sort(compareMethods);
@@ -256,7 +272,15 @@ angular
     }
 
     function compareMethods(a, b) {
-      return a.constructor ? -1: a.name > b.name ? 1 : -1;
+      if (a.constructor) {
+        return -1;
+      }
+
+      if (b.constructor) {
+        return 1;
+      }
+
+      return a.name > b.name ? 1 : -1;
     }
 
     $routeProvider

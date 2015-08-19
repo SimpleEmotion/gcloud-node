@@ -12,8 +12,9 @@ This client supports the following Google Cloud Platform services:
 
 * [Google BigQuery](#google-bigquery)
 * [Google Cloud Datastore](#google-cloud-datastore)
+* [Google Cloud DNS](#google-cloud-dns)
+* [Google Cloud Pub/Sub](#google-cloud-pubsub)
 * [Google Cloud Storage](#google-cloud-storage)
-* [Google Cloud Pub/Sub](#google-cloud-pubsub-beta) (Beta)
 * [Google Cloud Search](#google-cloud-search-alpha) (Alpha)
 
 If you need support for other Google APIs, check out the [Google Node.js API Client library][googleapis].
@@ -77,11 +78,13 @@ var gcloud = require('gcloud')({
 
 You can also set auth on a per-API-instance basis. The examples below show you how.
 
+
 ## Google BigQuery
 
-Analyze Big Data in the cloud with [Google BigQuery][cloud-bigquery] ([docs][cloud-bigquery-docs]) . Run fast, SQL-like queries against multi-terabyte datasets in seconds. Scalable and easy to use, BigQuery gives you real-time insights about your data.
+- [API Documentation][gcloud-bigquery-docs]
+- [Official Documentation][cloud-bigquery-docs]
 
-See the [gcloud-node BigQuery API documentation][gcloud-bigquery-docs] to learn how to access your BigQuery datasets using this library.
+#### Preview
 
 ```js
 var gcloud = require('gcloud');
@@ -103,19 +106,21 @@ schoolsDataset.import('/local/file.json', function(err, job) {});
 var job = bigquery.job('job-id');
 
 // Use a callback.
-job.getQueryResults(function(err, rows, nextQuery) {});
+job.getQueryResults(function(err, rows) {});
 
 // Or get the same results as a readable stream.
 job.getQueryResults().on('data', function(row) {});
 ```
 
+
 ## Google Cloud Datastore
 
-[Google Cloud Datastore][cloud-datastore] ([docs][cloud-datastore-docs]) is a fully managed, schemaless database for storing non-relational data. Cloud Datastore automatically scales with your users and supports ACID transactions, high availability of reads and writes, strong consistency for reads and ancestor queries, and eventual consistency for all other queries.
+- [API Documentation][gcloud-datastore-docs]
+- [Official Documentation][cloud-datastore-docs]
 
-Follow the [activation instructions][cloud-datastore-activation] to use the Google Cloud Datastore API with your project.
+*Follow the [activation instructions][cloud-datastore-activation] to use the Google Cloud Datastore API with your project.*
 
-See the [gcloud-node Datastore API documentation][gcloud-datastore-docs] to learn how to interact with the Cloud Datastore using this library.
+#### Preview
 
 ```js
 var gcloud = require('gcloud');
@@ -135,10 +140,8 @@ dataset.get(dataset.key(['Product', 'Computer']), function(err, entity) {
 // Save data to your dataset.
 var blogPostData = {
   title: 'How to make the perfect homemade pasta',
-  tags: ['pasta', 'homemade'],
   author: 'Andrew Chilton',
-  isDraft: true,
-  wordCount: 450
+  isDraft: true
 };
 
 var blogPostKey = dataset.key('BlogPost');
@@ -162,46 +165,53 @@ dataset.save({
 });
 ```
 
-## Google Cloud Storage
 
-[Google Cloud Storage][cloud-storage] ([docs][cloud-storage-docs]) allows you to store data on Google infrastructure with very high reliability, performance and availability, and can be used to distribute large data objects to users via direct download.
+## Google Cloud DNS
 
-See the [gcloud-node Storage API documentation][gcloud-storage-docs] to learn how to connect to Cloud Storage using this library.
+- [API Documentation][gcloud-dns-docs]
+- [Official Documentation][cloud-dns-docs]
+
+#### Preview
 
 ```js
-var fs = require('fs');
 var gcloud = require('gcloud');
 
 // Authorizing on a per-API-basis. You don't need to do this if you auth on a
 // global basis (see Authorization section above).
 
-var gcs = gcloud.storage({
+var dns = gcloud.dns({
   keyFilename: '/path/to/keyfile.json',
   projectId: 'my-project'
 });
 
-// Create a new bucket.
-gcs.createBucket('my-new-bucket', function(err, bucket) {});
+// Create a managed zone.
+dns.createZone('my-new-zone', {
+  dnsName: 'my-domain.com.'
+}, function(err, zone) {});
 
-// Reference an existing bucket.
-var bucket = gcs.bucket('my-bucket');
+// Reference an existing zone.
+var zone = dns.zone('my-existing-zone');
 
-// Upload a local file to a new file to be created in your bucket.
-var fileStream = fs.createReadStream('/local/file.txt');
-fileStream.pipe(bucket.file('file.txt').createWriteStream());
+// Create an NS record.
+var nsRecord = zone.record('ns', {
+  ttl: 86400,
+  name: 'my-domain.com.',
+  data: 'ns-cloud1.googledomains.com.'
+});
 
-// Download a remote file to a new local file.
-var fileStream = bucket.file('photo.jpg').createReadStream();
-fileStream.pipe(fs.createWriteStream('/local/photo.jpg'));
+zone.addRecord(nsRecord, function(err, change) {});
+
+// Create a zonefile from the records in your zone.
+zone.export('/zonefile.zone', function(err) {});
 ```
 
-## Google Cloud Pub/Sub (Beta)
 
-> This is a *Beta* release of Google Cloud Pub/Sub. This feature is not covered by any SLA or deprecation policy and may be subject to backward-incompatible changes.
+## Google Cloud Pub/Sub
 
-[Google Cloud Pub/Sub][cloud-pubsub] ([docs][cloud-pubsub-docs]) allows you to connect your services with reliable, many-to-many, asynchronous messaging hosted on Google's infrastructure. Cloud Pub/Sub automatically scales as you need it and provides a foundation for building your own robust, global services.
+- [API Documentation][gcloud-pubsub-docs]
+- [Official Documentation][cloud-pubsub-docs]
 
-See the [gcloud-node Pub/Sub API documentation][gcloud-pubsub-docs] to learn how to use Cloud Pub/Sub with this library.
+#### Preview
 
 ```js
 var gcloud = require('gcloud');
@@ -237,12 +247,67 @@ topic.subscribe('new-subscription', function(err, subscription) {
 });
 ```
 
+
+## Google Cloud Storage
+
+- [API Documentation][gcloud-storage-docs]
+- [Official Documentation][cloud-storage-docs]
+
+#### Preview
+
+```js
+var fs = require('fs');
+var gcloud = require('gcloud');
+
+// Authorizing on a per-API-basis. You don't need to do this if you auth on a
+// global basis (see Authorization section above).
+
+var gcs = gcloud.storage({
+  keyFilename: '/path/to/keyfile.json',
+  projectId: 'my-project'
+});
+
+// Create a new bucket.
+gcs.createBucket('my-new-bucket', function(err, bucket) {
+  if (!err) {
+    // "my-new-bucket" was successfully created.
+  }
+});
+
+// Reference an existing bucket.
+var bucket = gcs.bucket('my-existing-bucket');
+
+// Upload a local file to a new file to be created in your bucket.
+bucket.upload('/photos/zoo/zebra.jpg', function(err, file) {
+  if (!err) {
+    // "zebra.jpg" is now in your bucket.
+  }
+});
+
+// Download a file from your bucket.
+bucket.file('giraffe.jpg').download({
+  destination: '/photos/zoo/giraffe.jpg'
+}, function(err) {});
+
+// Streams are also supported for reading and writing files.
+var remoteReadStream = bucket.file('giraffe.jpg').createReadStream();
+var localWriteStream = fs.createWriteStream('/photos/zoo/giraffe.jpg');
+remoteReadStream.pipe(localWriteStream);
+
+var localReadStream = fs.createReadStream('/photos/zoo/zebra.jpg');
+var remoteWriteStream = bucket.file('zebra.jpg').createWriteStream();
+localReadStream.pipe(remoteWriteStream);
+```
+
+
 ## Google Cloud Search (Alpha)
+
 > This is an *Alpha* release of Google Cloud Search. This feature is not covered by any SLA or deprecation policy and may be subject to backward-incompatible changes.
 
-[Google Cloud Search][cloud-search] ([docs][cloud-search-docs]) allows you to quickly perform full-text and geospatial searches against your data without having to spin up your own instances and without the hassle of managing and maintaining a search service.
+- [API Documentation][gcloud-search-docs]
+- [Official Documentation][cloud-search-docs]
 
-See the [gcloud-node Search API documentation][gcloud-search-docs] to learn how to store and query your indexes and documents using this library.
+#### Preview
 
 ```js
 var gcloud = require('gcloud');
@@ -293,34 +358,31 @@ Apache 2.0 - See [COPYING](COPYING) for more information.
 [gcloud-docs]: https://googlecloudplatform.github.io/gcloud-node/#/docs
 [gcloud-bigquery-docs]: https://googlecloudplatform.github.io/gcloud-node/#/docs/bigquery
 [gcloud-datastore-docs]: https://googlecloudplatform.github.io/gcloud-node/#/docs/datastore
+[gcloud-dns-docs]: https://googlecloudplatform.github.io/gcloud-node/#/docs/dns
 [gcloud-pubsub-docs]: https://googlecloudplatform.github.io/gcloud-node/#/docs/pubsub
 [gcloud-search-docs]: https://googlecloudplatform.github.io/gcloud-node/#/docs/search
 [gcloud-storage-docs]: https://googlecloudplatform.github.io/gcloud-node/#/docs/storage
+
 [gcloud-todos]: https://github.com/GoogleCloudPlatform/gcloud-node-todos
 [gitnpm]: https://github.com/stephenplusplus/gitnpm
 [gcloud-kvstore]: https://github.com/stephenplusplus/gcloud-kvstore
+[hya-wave]: https://wav.hya.io
+[hya-io]: https://hya.io
 
 [dev-console]: https://console.developers.google.com/project
 [gce-how-to]: https://cloud.google.com/compute/docs/authentication#using
 
 [googleapis]: https://github.com/google/google-api-nodejs-client
 
-[cloud-bigquery]: https://cloud.google.com/bigquery/
 [cloud-bigquery-docs]: https://cloud.google.com/bigquery/what-is-bigquery
 
-[cloud-datastore]: https://cloud.google.com/datastore/
 [cloud-datastore-docs]: https://cloud.google.com/datastore/docs
 [cloud-datastore-activation]: https://cloud.google.com/datastore/docs/activate
 
-[cloud-pubsub]: https://cloud.google.com/pubsub/
+[cloud-dns-docs]: https://cloud.google.com/dns/docs
+
 [cloud-pubsub-docs]: https://cloud.google.com/pubsub/docs
 
-[cloud-search]: https://cloud.google.com/search/
 [cloud-search-docs]: https://cloud.google.com/search/
 
-[cloud-storage]: https://cloud.google.com/storage/
 [cloud-storage-docs]: https://cloud.google.com/storage/docs/overview
-[cloud-storage-create-bucket]: https://cloud.google.com/storage/docs/cloud-console#_creatingbuckets
-
-[hya-wave]: https://wav.hya.io
-[hya-io]: https://hya.io

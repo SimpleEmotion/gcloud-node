@@ -21,6 +21,7 @@ To run the system tests, first create and configure a project in the Google Deve
 
 - **GCLOUD_TESTS_PROJECT_ID**: Developers Console project's ID (e.g. bamboo-shift-455)
 - **GCLOUD_TESTS_KEY**: The path to the JSON key file.
+- ***GCLOUD_TESTS_DNS_DOMAIN*** (*optional*): A domain you own managed by Google Cloud DNS (expected format: `'gcloud-node.com.'`).
 
 Install the [gcloud command-line tool][gcloudcli] to your machine and use it to create the indexes used in the datastore system tests with indexes found in `system-test/data/index/yaml`:
 
@@ -37,7 +38,7 @@ $ gcloud config set project $GCLOUD_TESTS_PROJECT_ID
 $ gcloud auth login
 
 # Create the indexes
-$ gcloud preview datastore create-indexes system-test/data/
+$ gcloud preview datastore create-indexes system-test/data/index.yaml
 ```
 
 You may now run the system tests:

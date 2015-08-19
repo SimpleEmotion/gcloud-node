@@ -22,6 +22,7 @@ var crc = require('sse4_crc32');
 var crypto = require('crypto');
 var duplexify = require('duplexify');
 var extend = require('extend');
+var format = require('string-format-obj');
 var fs = require('fs');
 var mockery = require('mockery');
 var nodeutil = require('util');
@@ -47,27 +48,34 @@ function FakeDuplexify() {
   this.setWritable = function(setWritableStream) {
     writableStream = setWritableStream;
   };
+  this.destroy = function(err) {
+    if (err) {
+      this.emit('error', err);
+    } else {
+      this.end();
+    }
+  };
 }
 nodeutil.inherits(FakeDuplexify, stream.Duplex);
 
-var makeWritableStream_Override;
-var handleResp_Override;
+var makeWritableStreamOverride;
+var handleRespOverride;
 var fakeUtil = extend({}, util, {
   handleResp: function() {
-    (handleResp_Override || util.handleResp).apply(null, arguments);
+    (handleRespOverride || util.handleResp).apply(null, arguments);
   },
 
   makeWritableStream: function() {
     var args = arguments;
-    (makeWritableStream_Override || util.makeWritableStream).apply(null, args);
+    (makeWritableStreamOverride || util.makeWritableStream).apply(null, args);
   }
 });
 
 var REQUEST_DEFAULT_CONF;
-var request_Cached = request;
-var request_Override;
+var requestCached = request;
+var requestOverride;
 function fakeRequest() {
-  return (request_Override || request_Cached).apply(null, arguments);
+  return (requestOverride || requestCached).apply(null, arguments);
 }
 fakeRequest.defaults = function(defaultConfiguration) {
   // Ignore the default values, so we don't have to test for them in every API
@@ -119,7 +127,11 @@ describe('File', function() {
   beforeEach(function() {
     var options = {
       makeAuthorizedRequest_: function(req, callback) {
-        (callback.onAuthorized || callback)(null, req);
+        if (callback) {
+          (callback.onAuthorized || callback)(null, req);
+        } else {
+          return (requestOverride || requestCached)(req);
+        }
       }
     };
     bucket = new Bucket(options, 'bucket-name');
@@ -130,9 +142,9 @@ describe('File', function() {
     directoryFile = new File(bucket, 'directory/file.jpg');
     directoryFile.makeReq_ = util.noop;
 
-    handleResp_Override = null;
-    makeWritableStream_Override = null;
-    request_Override = null;
+    handleRespOverride = null;
+    makeWritableStreamOverride = null;
+    requestOverride = null;
   });
 
   it('should have set correct defaults on Request', function() {
@@ -167,7 +179,7 @@ describe('File', function() {
       var newFile = new File(bucket, 'nested/file.jpg');
 
       var expectedPath =
-        util.format('/o/{srcName}/copyTo/b/{destBucket}/o/{destName}', {
+        format('/o/{srcName}/copyTo/b/{destBucket}/o/{destName}', {
           srcName: encodeURIComponent(directoryFile.name),
           destBucket: file.bucket.name,
           destName: encodeURIComponent(newFile.name)
@@ -204,7 +216,7 @@ describe('File', function() {
       it('should allow a string', function(done) {
         var newFileName = 'new-file-name.png';
         var expectedPath =
-          util.format('/o/{srcName}/copyTo/b/{destBucket}/o/{destName}', {
+          format('/o/{srcName}/copyTo/b/{destBucket}/o/{destName}', {
             srcName: file.name,
             destBucket: file.bucket.name,
             destName: newFileName
@@ -216,7 +228,7 @@ describe('File', function() {
       it('should allow a Bucket', function(done) {
         var newBucket = new Bucket({}, 'new-bucket');
         var expectedPath =
-          util.format('/o/{srcName}/copyTo/b/{destBucket}/o/{destName}', {
+          format('/o/{srcName}/copyTo/b/{destBucket}/o/{destName}', {
             srcName: file.name,
             destBucket: newBucket.name,
             destName: file.name
@@ -229,7 +241,7 @@ describe('File', function() {
         var newBucket = new Bucket({}, 'new-bucket');
         var newFile = new File(newBucket, 'new-file');
         var expectedPath =
-          util.format('/o/{srcName}/copyTo/b/{destBucket}/o/{destName}', {
+          format('/o/{srcName}/copyTo/b/{destBucket}/o/{destName}', {
             srcName: file.name,
             destBucket: newBucket.name,
             destName: newFile.name
@@ -426,8 +438,14 @@ describe('File', function() {
         var self = this;
 
         setImmediate(function() {
-          self.emit('response', fakeResponse);
-          self.emit('complete', fakeResponse);
+          var responseStream = through();
+          self.emit('response', responseStream);
+          responseStream.push(data);
+          responseStream.push(null);
+
+          setImmediate(function() {
+            self.emit('complete', fakeResponse);
+          });
         });
       }
       nodeutil.inherits(FakeSuccessfulRequest, FakeRequest);
@@ -463,20 +481,23 @@ describe('File', function() {
 
       versionedFile.bucket.storage.makeAuthorizedRequest_ = function(reqOpts) {
         assert.equal(reqOpts.qs.generation, 1);
-        done();
+        setImmediate(function() {
+          done();
+        });
+        return new FakeDuplexify();
       };
 
       versionedFile.createReadStream();
     });
 
     it('should end request stream on error', function(done) {
-      request_Override = getFakeSuccessfulRequest('body', { body: null });
+      requestOverride = getFakeSuccessfulRequest('body', { body: null });
 
       var readStream = file.createReadStream();
 
       readStream.once('error', function() {
-        assert(request_Override.wasRequestAborted());
-        assert(request_Override.wasRequestDestroyed());
+        assert(requestOverride.wasRequestAborted());
+        assert(requestOverride.wasRequestDestroyed());
         done();
       });
 
@@ -485,7 +506,7 @@ describe('File', function() {
 
     describe('authorizing', function() {
       it('should create an authorized request', function(done) {
-        var expectedPath = util.format('https://{host}/{b}/{o}', {
+        var expectedPath = format('https://{host}/{b}/{o}', {
           host: 'storage.googleapis.com',
           b: file.bucket.name,
           o: encodeURIComponent(file.name)
@@ -493,7 +514,22 @@ describe('File', function() {
 
         file.bucket.storage.makeAuthorizedRequest_ = function(opts) {
           assert.equal(opts.uri, expectedPath);
-          done();
+          setImmediate(function() {
+            done();
+          });
+          return new FakeDuplexify();
+        };
+
+        file.createReadStream();
+      });
+
+      it('should accept gzip encoding', function(done) {
+        file.bucket.storage.makeAuthorizedRequest_ = function(opts) {
+          assert.strictEqual(opts.gzip, true);
+          setImmediate(function() {
+            done();
+          });
+          return new FakeDuplexify();
         };
 
         file.createReadStream();
@@ -503,10 +539,14 @@ describe('File', function() {
         var ERROR = new Error('Error.');
 
         beforeEach(function() {
-          file.bucket.storage.makeAuthorizedRequest_ = function(opt, callback) {
+          file.bucket.storage.makeAuthorizedRequest_ = function(opts) {
+            var stream = (requestOverride || request)(opts);
+
             setImmediate(function() {
-              (callback.onAuthorized || callback)(ERROR);
+              stream.emit('error', ERROR);
             });
+
+            return stream;
           };
         });
 
@@ -517,12 +557,6 @@ describe('File', function() {
               done();
             });
         });
-
-        it('should destroy the through stream', function(done) {
-          var readStream = file.createReadStream();
-          readStream.once('error', util.noop);
-          readStream.destroy = done;
-        });
       });
     });
 
@@ -530,45 +564,84 @@ describe('File', function() {
       it('should get readable stream from request', function(done) {
         var fakeRequest = { a: 'b', c: 'd' };
 
-        request_Override = getFakeRequest();
+        requestOverride = getFakeRequest();
 
-        file.bucket.storage.makeAuthorizedRequest_ = function(opts, callback) {
-          (callback.onAuthorized || callback)(null, fakeRequest);
-          assert.deepEqual(request_Override.getRequestOptions(), fakeRequest);
-          done();
+        file.bucket.storage.makeAuthorizedRequest_ = function() {
+          setImmediate(function() {
+            assert.deepEqual(requestOverride.getRequestOptions(), fakeRequest);
+            done();
+          });
+
+          return requestOverride(fakeRequest);
         };
 
         file.createReadStream();
       });
 
       it('should emit response event from request', function(done) {
-        var response = {
-          headers: { 'x-goog-hash': 'md5=fakefakefake' }
-        };
-        request_Override = getFakeSuccessfulRequest('body', response);
+        requestOverride = getFakeSuccessfulRequest('body');
 
         file.createReadStream({ validation: false })
-          .on('response', function(res) {
-            assert.deepEqual(response, res);
+          .on('response', function() {
             done();
           });
+      });
+
+      it('should unpipe stream from an error on the response', function(done) {
+        var requestStream = through();
+
+        file.bucket.storage.makeAuthorizedRequest_ = function() {
+          setImmediate(function() {
+            // Must be a stream. Doesn't matter for the tests, though.
+            requestStream.emit('response', through());
+          });
+
+          return requestStream;
+        };
+
+        handleRespOverride = function(err, resp, body, callback) {
+          assert.strictEqual(requestStream._readableState.pipesCount, 1);
+          assert.strictEqual(requestStream._readableState.pipes, readStream);
+
+          // Triggers the unpipe.
+          callback(new Error());
+
+          setImmediate(function() {
+            assert.strictEqual(requestStream._readableState.pipesCount, 0);
+            assert.strictEqual(requestStream._readableState.pipes, null);
+            done();
+          });
+        };
+
+        var readStream = file.createReadStream();
+      });
+
+      it('should let util.handleResp handle the response', function(done) {
+        var response = { a: 'b', c: 'd' };
+
+        handleRespOverride = function(err, response_, body) {
+          assert.strictEqual(err, null);
+          assert.strictEqual(response_, response);
+          assert.strictEqual(body, null);
+          done();
+        };
+
+        file.bucket.storage.makeAuthorizedRequest_ = function() {
+          var stream = through();
+          setImmediate(function() {
+            stream.emit('complete', response);
+          });
+          return stream;
+        };
+
+        file.createReadStream();
       });
 
       describe('errors', function() {
         var ERROR = new Error('Error.');
 
         beforeEach(function() {
-          request_Override = getFakeFailedRequest(ERROR);
-        });
-
-        it('should end the request stream', function(done) {
-          var readStream = file.createReadStream();
-
-          readStream.once('error', function() {
-            assert(request_Override.wasRequestAborted());
-            assert(request_Override.wasRequestDestroyed());
-            done();
-          });
+          requestOverride = getFakeFailedRequest(ERROR);
         });
 
         it('should emit the error', function(done) {
@@ -577,59 +650,6 @@ describe('File', function() {
               assert.deepEqual(err, ERROR);
               done();
             });
-        });
-
-        it('should destroy the through stream', function(done) {
-          var readStream = file.createReadStream();
-          readStream.destroy = done;
-        });
-      });
-    });
-
-    describe('response', function() {
-      it('should use util.handleResp', function(done) {
-        var response = {
-          body: {
-            a: 'b',
-            c: 'd',
-          }
-        };
-
-        request_Override = getFakeSuccessfulRequest('body', response);
-
-        handleResp_Override = function(err, resp, body) {
-          assert.strictEqual(err, null);
-          assert.deepEqual(resp, response);
-          assert.deepEqual(body, response.body);
-          done();
-        };
-
-        file.createReadStream();
-      });
-
-      describe('errors', function() {
-        var ERROR = new Error('Error.');
-
-        beforeEach(function() {
-          request_Override = getFakeSuccessfulRequest('body', { body: null });
-
-          handleResp_Override = function(err, resp, body, callback) {
-            callback(ERROR);
-          };
-        });
-
-        it('should emit the error', function(done) {
-          var readStream = file.createReadStream();
-
-          readStream.once('error', function(err) {
-            assert.deepEqual(err, ERROR);
-            done();
-          });
-        });
-
-        it('should destroy the through stream', function(done) {
-          var readStream = file.createReadStream();
-          readStream.destroy = done;
         });
       });
     });
@@ -656,22 +676,26 @@ describe('File', function() {
         file.metadata.mediaLink = 'http://uri';
 
         file.bucket.storage.makeAuthorizedRequest_ = function(opts, callback) {
-          (callback.onAuthorized || callback)(null, {});
+          if (callback) {
+            (callback.onAuthorized || callback)(null, {});
+          } else {
+            return (requestOverride || requestCached)(opts);
+          }
         };
       });
 
       it('should validate with crc32c', function(done) {
-        request_Override = getFakeSuccessfulRequest(data, fakeResponse.crc32c);
+        requestOverride = getFakeSuccessfulRequest(data, fakeResponse.crc32c);
 
         file.createReadStream({ validation: 'crc32c' })
           .on('error', done)
-          .on('complete', function () {
+          .on('complete', function() {
             done();
           });
       });
 
       it('should emit an error if crc32c validation fails', function(done) {
-        request_Override = getFakeSuccessfulRequest(
+        requestOverride = getFakeSuccessfulRequest(
             'bad-data', fakeResponse.crc32c);
 
         file.createReadStream({ validation: 'crc32c' })
@@ -682,17 +706,17 @@ describe('File', function() {
       });
 
       it('should validate with md5', function(done) {
-        request_Override = getFakeSuccessfulRequest(data, fakeResponse.md5);
+        requestOverride = getFakeSuccessfulRequest(data, fakeResponse.md5);
 
         file.createReadStream({ validation: 'md5' })
           .on('error', done)
-          .on('complete', function () {
+          .on('complete', function() {
             done();
           });
       });
 
       it('should emit an error if md5 validation fails', function(done) {
-        request_Override = getFakeSuccessfulRequest(
+        requestOverride = getFakeSuccessfulRequest(
             'bad-data', fakeResponse.crc32c);
 
         file.createReadStream({ validation: 'md5' })
@@ -703,7 +727,7 @@ describe('File', function() {
       });
 
       it('should default to md5 validation', function(done) {
-        request_Override = getFakeSuccessfulRequest(data, {
+        requestOverride = getFakeSuccessfulRequest(data, {
           headers: { 'x-goog-hash': 'md5=fakefakefake' }
         });
 
@@ -716,19 +740,18 @@ describe('File', function() {
 
       describe('destroying the through stream', function() {
         it('should destroy after failed validation', function(done) {
-          request_Override = getFakeSuccessfulRequest(
+          requestOverride = getFakeSuccessfulRequest(
               'bad-data', fakeResponse.crc32c);
 
           var readStream = file.createReadStream({ validation: 'md5' });
-          readStream.destroy = done;
+          readStream.end = done;
         });
 
         it('should destroy after successful validation', function(done) {
-          request_Override = getFakeSuccessfulRequest(
-              data, fakeResponse.crc32c);
+          requestOverride = getFakeSuccessfulRequest(data, fakeResponse.crc32c);
 
           var readStream = file.createReadStream({ validation: 'crc32c' });
-          readStream.destroy = done;
+          readStream.end = done;
         });
       });
     });
@@ -737,8 +760,8 @@ describe('File', function() {
       it('should accept a start range', function(done) {
         var startOffset = 100;
 
-        request_Override = function(opts) {
-          setImmediate(function () {
+        requestOverride = function(opts) {
+          setImmediate(function() {
             assert.equal(opts.headers.Range, 'bytes=' + startOffset + '-');
             done();
           });
@@ -751,8 +774,8 @@ describe('File', function() {
       it('should accept an end range and set start to 0', function(done) {
         var endOffset = 100;
 
-        request_Override = function(opts) {
-          setImmediate(function () {
+        requestOverride = function(opts) {
+          setImmediate(function() {
             assert.equal(opts.headers.Range, 'bytes=0-' + endOffset);
             done();
           });
@@ -766,8 +789,8 @@ describe('File', function() {
         var startOffset = 100;
         var endOffset = 101;
 
-        request_Override = function(opts) {
-          setImmediate(function () {
+        requestOverride = function(opts) {
+          setImmediate(function() {
             var expectedRange = 'bytes=' + startOffset + '-' + endOffset;
             assert.equal(opts.headers.Range, expectedRange);
             done();
@@ -782,8 +805,8 @@ describe('File', function() {
         var startOffset = 0;
         var endOffset = 0;
 
-        request_Override = function(opts) {
-          setImmediate(function () {
+        requestOverride = function(opts) {
+          setImmediate(function() {
             var expectedRange = 'bytes=0-0';
             assert.equal(opts.headers.Range, expectedRange);
             done();
@@ -794,11 +817,11 @@ describe('File', function() {
         file.createReadStream({ start: startOffset, end: endOffset });
       });
 
-      it('should destroy the through stream', function(done) {
-        request_Override = getFakeSuccessfulRequest('body', { body: null });
+      it('should end the through stream', function(done) {
+        requestOverride = getFakeSuccessfulRequest('body', { body: null });
 
         var readStream = file.createReadStream({ start: 100 });
-        readStream.destroy = done;
+        readStream.end = done;
       });
     });
 
@@ -806,8 +829,8 @@ describe('File', function() {
       it('should make a request for the tail bytes', function(done) {
         var endOffset = -10;
 
-        request_Override = function(opts) {
-          setImmediate(function () {
+        requestOverride = function(opts) {
+          setImmediate(function() {
             assert.equal(opts.headers.Range, 'bytes=' + endOffset);
             done();
           });
@@ -862,7 +885,7 @@ describe('File', function() {
       };
 
       // respond to first upload PUT request.
-      request_Override = function() {
+      requestOverride = function() {
         var stream = through();
         setImmediate(function() {
           stream.emit('error', error);
@@ -916,6 +939,17 @@ describe('File', function() {
 
       file.startResumableUpload_ = function(stream, metadata) {
         assert.deepEqual(metadata, METADATA);
+        done();
+      };
+
+      writable.write('data');
+    });
+
+    it('should set metadata.contentEncoding with gzip', function(done) {
+      var writable = file.createWriteStream({ gzip: true });
+
+      file.startResumableUpload_ = function(stream, metadata) {
+        assert.strictEqual(metadata.contentEncoding, 'gzip');
         done();
       };
 
@@ -1367,9 +1401,9 @@ describe('File', function() {
       file.getSignedPolicy({
         expiration: Math.round(Date.now() / 1000) + 5
       }, function(err, signedPolicy) {
-          var conditionString = '[\"eq\",\"$key\",\"'+file.name+'\"]';
-          assert.ifError(err);
-          assert(signedPolicy.string.indexOf(conditionString) > -1);
+        var conditionString = '[\"eq\",\"$key\",\"' + file.name + '\"]';
+        assert.ifError(err);
+        assert(signedPolicy.string.indexOf(conditionString) > -1);
         done();
       });
     });
@@ -1379,9 +1413,9 @@ describe('File', function() {
         expiration: Math.round(Date.now() / 1000) + 5,
         acl: '<acl>'
       }, function(err, signedPolicy) {
-          var conditionString = '{\"acl\":\"<acl>\"}';
-          assert.ifError(err);
-          assert(signedPolicy.string.indexOf(conditionString) > -1);
+        var conditionString = '{\"acl\":\"<acl>\"}';
+        assert.ifError(err);
+        assert(signedPolicy.string.indexOf(conditionString) > -1);
         done();
       });
     });
@@ -1831,7 +1865,7 @@ describe('File', function() {
 
         // respond to first upload PUT request.
         var metadata = { a: 'b', c: 'd' };
-        request_Override = function(reqOpts) {
+        requestOverride = function(reqOpts) {
           assert.equal(reqOpts.headers['Content-Range'], 'bytes 0-*/*');
 
           var stream = through();
@@ -1898,7 +1932,7 @@ describe('File', function() {
         };
 
         var metadata = { a: 'b', c: 'd' };
-        request_Override = function(reqOpts) {
+        requestOverride = function(reqOpts) {
           var startByte = lastByte + 1;
           assert.equal(
             reqOpts.headers['Content-Range'], 'bytes ' + startByte + '-*/*');
@@ -1931,7 +1965,7 @@ describe('File', function() {
 
   describe('startSimpleUpload_', function() {
     it('should get a writable stream', function(done) {
-      makeWritableStream_Override = function() {
+      makeWritableStreamOverride = function() {
         done();
       };
 
@@ -1941,7 +1975,7 @@ describe('File', function() {
     it('should pass the required arguments', function(done) {
       var metadata = { a: 'b', c: 'd' };
 
-      makeWritableStream_Override = function(stream, options) {
+      makeWritableStreamOverride = function(stream, options) {
         assert.deepEqual(options.metadata, metadata);
         assert.deepEqual(options.request, {
           qs: {
@@ -1959,7 +1993,7 @@ describe('File', function() {
     it('should send query.ifGenerationMatch if File has one', function(done) {
       var versionedFile = new File(bucket, 'new-file.txt', { generation: 1 });
 
-      makeWritableStream_Override = function(stream, options) {
+      makeWritableStreamOverride = function(stream, options) {
         assert.equal(options.request.qs.ifGenerationMatch, 1);
         done();
       };
@@ -1970,7 +2004,7 @@ describe('File', function() {
     it('should finish stream and set metadata', function(done) {
       var metadata = { a: 'b', c: 'd' };
 
-      makeWritableStream_Override = function(stream, options, callback) {
+      makeWritableStreamOverride = function(stream, options, callback) {
         callback(metadata);
       };
 

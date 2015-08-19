@@ -34,53 +34,14 @@ function deleteDocument(document, callback) {
 }
 
 function deleteIndexContents(index, callback) {
-  function handleResp(err, documents, nextQuery) {
+  index.getDocuments({ view: 'ID_ONLY' }, function(err, documents) {
     if (err) {
       callback(err);
       return;
     }
 
-    async.eachLimit(documents, MAX_PARALLEL, deleteDocument, function(err) {
-      if (err) {
-        callback(err);
-        return;
-      }
-
-      if (nextQuery) {
-        index.getDocuments(nextQuery, handleResp);
-        return;
-      }
-
-      callback();
-    });
-  }
-
-  index.getDocuments(handleResp);
-}
-
-function deleteAllDocuments(callback) {
-  function handleResp(err, indexes, nextQuery) {
-    if (err) {
-      callback(err);
-      return;
-    }
-
-    async.eachLimit(indexes, MAX_PARALLEL, deleteIndexContents, function(err) {
-      if (err) {
-        callback(err);
-        return;
-      }
-
-      if (nextQuery) {
-        search.getIndexes(nextQuery, handleResp);
-        return;
-      }
-
-      callback();
-    });
-  }
-
-  search.getIndexes(handleResp);
+    async.eachLimit(documents, MAX_PARALLEL, deleteDocument, callback);
+  });
 }
 
 function generateIndexName() {
@@ -95,12 +56,8 @@ describe('Search', function() {
   var INDEX_NAME = generateIndexName();
   var index = search.index(INDEX_NAME);
 
-  before(function(done) {
-    deleteAllDocuments(done);
-  });
-
   after(function(done) {
-    deleteAllDocuments(done);
+    deleteIndexContents(index, done);
   });
 
   describe('creating an index', function() {
@@ -160,21 +117,15 @@ describe('Search', function() {
     var document;
 
     before(function(done) {
-      async.series([
-        deleteAllDocuments,
-
-        function(next) {
-          index.createDocument(TEST_DOCUMENT_JSON, function(err, doc) {
-            if (err) {
-              next(err);
-              return;
-            }
-
-            document = doc;
-            next();
-          });
+      index.createDocument(TEST_DOCUMENT_JSON, function(err, doc) {
+        if (err) {
+          done(err);
+          return;
         }
-      ], done);
+
+        document = doc;
+        done();
+      });
     });
 
     after(function(done) {
@@ -240,7 +191,8 @@ describe('Search', function() {
         document.getMetadata(function(err) {
           assert.ifError(err);
           assert.deepEqual(document.toJSON(), TEST_DOCUMENT_JSON);
-          done();
+
+          document.delete(done);
         });
       });
     });
@@ -251,7 +203,8 @@ describe('Search', function() {
         document.getMetadata(function(err) {
           assert.ifError(err);
           assert.deepEqual(document.toJSON(), TEST_DOCUMENT_JSON);
-          done();
+
+          document.delete(done);
         });
       });
     });

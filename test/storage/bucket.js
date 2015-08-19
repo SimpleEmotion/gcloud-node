@@ -16,11 +16,14 @@
 
 'use strict';
 
+var arrify = require('arrify');
 var assert = require('assert');
 var async = require('async');
 var extend = require('extend');
+var format = require('string-format-obj');
 var mime = require('mime-types');
 var mockery = require('mockery');
+var propAssign = require('prop-assign');
 var request = require('request');
 var stream = require('stream');
 var util = require('../../lib/common/util.js');
@@ -45,10 +48,10 @@ function FakeFile(bucket, name) {
   };
 }
 
-var request_Cached = request;
-var request_Override;
+var requestCached = request;
+var requestOverride;
 function fakeRequest() {
-  return (request_Override || request_Cached).apply(null, arguments);
+  return (requestOverride || requestCached).apply(null, arguments);
 }
 fakeRequest.defaults = function() {
   // Ignore the default values, so we don't have to test for them in every API
@@ -56,11 +59,25 @@ fakeRequest.defaults = function() {
   return fakeRequest;
 };
 
-var eachLimit_Override;
+var eachLimitOverride;
 
 var fakeAsync = extend({}, async);
 fakeAsync.eachLimit = function() {
-  (eachLimit_Override || async.eachLimit).apply(null, arguments);
+  (eachLimitOverride || async.eachLimit).apply(null, arguments);
+};
+
+var extended = false;
+var fakeStreamRouter = {
+  extend: function(Class, methods) {
+    if (Class.name !== 'Bucket') {
+      return;
+    }
+
+    methods = arrify(methods);
+    assert.equal(Class.name, 'Bucket');
+    assert.deepEqual(methods, ['getFiles']);
+    extended = true;
+  }
 };
 
 describe('Bucket', function() {
@@ -75,6 +92,7 @@ describe('Bucket', function() {
 
   before(function() {
     mockery.registerMock('./file.js', FakeFile);
+    mockery.registerMock('../common/stream-router.js', fakeStreamRouter);
     mockery.registerMock('async', fakeAsync);
     mockery.registerMock('request', fakeRequest);
     mockery.enable({
@@ -90,12 +108,16 @@ describe('Bucket', function() {
   });
 
   beforeEach(function() {
-    request_Override = null;
-    eachLimit_Override = null;
+    requestOverride = null;
+    eachLimitOverride = null;
     bucket = new Bucket(options, BUCKET_NAME);
   });
 
-  describe('initialization', function() {
+  describe('instantiation', function() {
+    it('should extend the correct methods', function() {
+      assert(extended); // See `fakeStreamRouter.extend`
+    });
+
     it('should re-use provided connection', function() {
       assert.deepEqual(bucket.authorizeReq_, options.authorizeReq_);
     });
@@ -218,7 +240,7 @@ describe('Bucket', function() {
       var destination = bucket.file('destination.txt');
 
       bucket.storage.makeAuthorizedRequest_ = function(reqOpts) {
-        var expectedUri = util.format('{base}/{bucket}/o/{file}/compose', {
+        var expectedUri = format('{base}/{bucket}/o/{file}/compose', {
           base: 'https://www.googleapis.com/storage/v1/b',
           bucket: destination.bucket.name,
           file: encodeURIComponent(destination.name)
@@ -335,6 +357,108 @@ describe('Bucket', function() {
       };
       bucket.delete(function(err, apiResponse) {
         assert.deepEqual(resp, apiResponse);
+        done();
+      });
+    });
+  });
+
+  describe('deleteFiles', function() {
+    it('should get files from the bucket', function(done) {
+      var query = { a: 'b', c: 'd' };
+
+      bucket.getFiles = function(query_) {
+        assert.deepEqual(query_, query);
+        done();
+      };
+
+      bucket.deleteFiles(query, assert.ifError);
+    });
+
+    it('should process 10 files at a time', function(done) {
+      eachLimitOverride = function(arr, limit) {
+        assert.equal(limit, 10);
+        done();
+      };
+
+      bucket.getFiles = function(query, callback) {
+        callback(null, []);
+      };
+
+      bucket.deleteFiles({}, assert.ifError);
+    });
+
+    it('should delete the files', function(done) {
+      var timesCalled = 0;
+
+      var files = [
+        bucket.file('1'),
+        bucket.file('2')
+      ].map(propAssign('delete', function(callback) {
+        timesCalled++;
+        callback();
+      }));
+
+      bucket.getFiles = function(query, callback) {
+        callback(null, files);
+      };
+
+      bucket.deleteFiles({}, function(err) {
+        assert.ifError(err);
+        assert.equal(timesCalled, files.length);
+        done();
+      });
+    });
+
+    it('should execute callback with error from getting files', function(done) {
+      var error = new Error('Error.');
+
+      bucket.getFiles = function(query, callback) {
+        callback(error);
+      };
+
+      bucket.deleteFiles({}, function(err) {
+        assert.strictEqual(err, error);
+        done();
+      });
+    });
+
+    it('should execute callback with error from deleting file', function(done) {
+      var error = new Error('Error.');
+
+      var files = [
+        bucket.file('1'),
+        bucket.file('2')
+      ].map(propAssign('delete', function(callback) {
+        callback(error);
+      }));
+
+      bucket.getFiles = function(query, callback) {
+        callback(null, files);
+      };
+
+      bucket.deleteFiles({}, function(err) {
+        assert.strictEqual(err, error);
+        done();
+      });
+    });
+
+    it('should execute callback with queued errors', function(done) {
+      var error = new Error('Error.');
+
+      var files = [
+        bucket.file('1'),
+        bucket.file('2')
+      ].map(propAssign('delete', function(callback) {
+        callback(error);
+      }));
+
+      bucket.getFiles = function(query, callback) {
+        callback(null, files);
+      };
+
+      bucket.deleteFiles({ force: true }, function(errs) {
+        assert.strictEqual(errs[0], error);
+        assert.strictEqual(errs[1], error);
         done();
       });
     });
@@ -822,6 +946,21 @@ describe('Bucket', function() {
       bucket.upload(filepath, options, assert.ifError);
     });
 
+    it('should allow specifying options.gzip', function(done) {
+      var fakeFile = new FakeFile(bucket, 'file-name');
+      var options = { destination: fakeFile, gzip: true };
+      fakeFile.createWriteStream = function(options) {
+        var ws = new stream.Writable();
+        ws.write = util.noop;
+        setImmediate(function() {
+          assert.strictEqual(options.gzip, true);
+          done();
+        });
+        return ws;
+      };
+      bucket.upload(filepath, options, assert.ifError);
+    });
+
     it('should allow specifying options.resumable', function(done) {
       var fakeFile = new FakeFile(bucket, 'file-name');
       var options = { destination: fakeFile, resumable: false };
@@ -866,12 +1005,12 @@ describe('Bucket', function() {
     });
 
     it('should process 10 files at a time', function(done) {
-      eachLimit_Override = function(arr, limit) {
+      eachLimitOverride = function(arr, limit) {
         assert.equal(limit, 10);
         done();
       };
 
-      bucket.getFiles = function(query, callback) {
+      bucket.getFiles = function(callback) {
         callback(null, []);
       };
 
@@ -884,12 +1023,12 @@ describe('Bucket', function() {
       var files = [
         bucket.file('1'),
         bucket.file('2')
-      ].map(util.propAssign('makePublic', function(callback) {
+      ].map(propAssign('makePublic', function(callback) {
         timesCalled++;
         callback();
       }));
 
-      bucket.getFiles = function(query, callback) {
+      bucket.getFiles = function(callback) {
         callback(null, files);
       };
 
@@ -906,12 +1045,12 @@ describe('Bucket', function() {
       var files = [
         bucket.file('1'),
         bucket.file('2')
-      ].map(util.propAssign('makePrivate', function(callback) {
+      ].map(propAssign('makePrivate', function(callback) {
         timesCalled++;
         callback();
       }));
 
-      bucket.getFiles = function(query, callback) {
+      bucket.getFiles = function(callback) {
         callback(null, files);
       };
 
@@ -922,27 +1061,10 @@ describe('Bucket', function() {
       });
     });
 
-    it('should get more files if more exist', function(done) {
-      var fakeNextQuery = { a: 'b', c: 'd' };
-
-      bucket.getFiles = function(query, callback) {
-        if (Object.keys(query).length === 0) {
-          // First time through, return a `nextQuery` value.
-          callback(null, [], fakeNextQuery);
-        } else {
-          // Second time through.
-          assert.deepEqual(query, fakeNextQuery);
-          done();
-        }
-      };
-
-      bucket.makeAllFilesPublicPrivate_({}, assert.ifError);
-    });
-
     it('should execute callback with error from getting files', function(done) {
       var error = new Error('Error.');
 
-      bucket.getFiles = function(query, callback) {
+      bucket.getFiles = function(callback) {
         callback(error);
       };
 
@@ -958,11 +1080,11 @@ describe('Bucket', function() {
       var files = [
         bucket.file('1'),
         bucket.file('2')
-      ].map(util.propAssign('makePublic', function(callback) {
+      ].map(propAssign('makePublic', function(callback) {
         callback(error);
       }));
 
-      bucket.getFiles = function(query, callback) {
+      bucket.getFiles = function(callback) {
         callback(null, files);
       };
 
@@ -978,11 +1100,11 @@ describe('Bucket', function() {
       var files = [
         bucket.file('1'),
         bucket.file('2')
-      ].map(util.propAssign('makePublic', function(callback) {
+      ].map(propAssign('makePublic', function(callback) {
         callback(error);
       }));
 
-      bucket.getFiles = function(query, callback) {
+      bucket.getFiles = function(callback) {
         callback(null, files);
       };
 
@@ -1001,18 +1123,18 @@ describe('Bucket', function() {
       var successFiles = [
         bucket.file('1'),
         bucket.file('2')
-      ].map(util.propAssign('makePublic', function(callback) {
+      ].map(propAssign('makePublic', function(callback) {
         callback();
       }));
 
       var errorFiles = [
         bucket.file('3'),
         bucket.file('4')
-      ].map(util.propAssign('makePublic', function(callback) {
+      ].map(propAssign('makePublic', function(callback) {
         callback(error);
       }));
 
-      bucket.getFiles = function(query, callback) {
+      bucket.getFiles = function(callback) {
         callback(null, successFiles.concat(errorFiles));
       };
 

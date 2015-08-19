@@ -44,7 +44,7 @@ var gcloud = require('gcloud')({
     </article>
     <hr>
 
-    <article ng-repeat="service in ['bigquery', 'datastore', 'pubsub', 'search', 'storage']"
+    <article ng-repeat="service in ['bigquery', 'datastore', 'dns', 'pubsub', 'search', 'storage']"
              ng-if="isActiveDoc(service)"
              ng-include="'site/components/docs/' + service + '-overview.html'">
     </article>
@@ -54,7 +54,6 @@ var gcloud = require('gcloud')({
       ng-hide="singleMethod && method.name !== singleMethod">
       <h2 ng-if="method.name[0].toUpperCase() === method.name[0]">
         {{method.name}}
-        <span class="view-code-link" docs-code-link></span>
       </h2>
       <h3
         class="method-heading"
@@ -65,14 +64,13 @@ var gcloud = require('gcloud')({
           <span>#</span>
           {{method.name}}
         </a>
-        <span class="view-code-link" docs-code-link></span>
       </h3>
       <p ng-if="method.description" ng-bind-html="method.description"></p>
-      <div ng-show="method.name[0].toUpperCase() === method.name[0]"
+      <div ng-show="method.constructor"
         class="notice">
         Available methods:
         <span ng-repeat="method in methods">
-          <span ng-show="method.name[0].toUpperCase() !== method.name[0]">
+          <span ng-show="$index > 0">
             <a href="{{activeUrl + '?method=' + method.name}}"
               >{{method.name}}</a>{{$last ? '' : ', '}}
           </span>
@@ -83,7 +81,10 @@ var gcloud = require('gcloud')({
         <tbody>
           <tr
             ng-repeat="param in method.params"
-            ng-class="{ 'param-optional': param.optional }">
+            ng-class="{
+              'param-optional': param.optional,
+              'param-nullable': param.nullable
+            }">
             <th scope="row" class="param">
               <span ng-if="param.subparam" class="param-parent">
                 <div>{{param.name.split('.').slice(0, -1).join('.')}}</div>
@@ -101,6 +102,11 @@ var gcloud = require('gcloud')({
       <h4 ng-show="method.example">Example</h4>
       <div docs-example ng-repeat-end
         ng-show="method.example" ng-bind-html="method.example"></div>
+      <h4>More information</h4>
+      <ul class="resource-links">
+        <li docs-code-link></li>
+        <li ng-repeat="doc in method.docs" ng-bind-html="doc"></li>
+      </ul>
       <hr ng-if="$index < methods.length - 1">
     </article>
   </article>

@@ -24,18 +24,21 @@ var extend = require('extend');
 var googleAuthLibrary = require('google-auth-library');
 var mockery = require('mockery');
 var request = require('request');
+var retryRequest = require('retry-request');
 var stream = require('stream');
+var streamForward = require('stream-forward');
+var through = require('through2');
 
-var googleAuthLibrary_Override;
+var googleAuthLibraryOverride;
 function fakeGoogleAuthLibrary() {
-  return (googleAuthLibrary_Override || googleAuthLibrary)
+  return (googleAuthLibraryOverride || googleAuthLibrary)
     .apply(null, arguments);
 }
 
 var REQUEST_DEFAULT_CONF;
-var request_Override;
+var requestOverride;
 function fakeRequest() {
-  return (request_Override || request).apply(null, arguments);
+  return (requestOverride || request).apply(null, arguments);
 }
 fakeRequest.defaults = function(defaultConfiguration) {
   // Ignore the default values, so we don't have to test for them in every API
@@ -44,6 +47,16 @@ fakeRequest.defaults = function(defaultConfiguration) {
   return fakeRequest;
 };
 
+var retryRequestOverride;
+function fakeRetryRequest() {
+  return (retryRequestOverride || retryRequest).apply(null, arguments);
+}
+
+var streamForwardOverride;
+function fakeStreamForward() {
+  return (streamForwardOverride || streamForward).apply(null, arguments);
+}
+
 describe('common/util', function() {
   var util;
   var utilOverrides = {};
@@ -51,12 +64,14 @@ describe('common/util', function() {
   before(function() {
     mockery.registerMock('google-auth-library', fakeGoogleAuthLibrary);
     mockery.registerMock('request', fakeRequest);
+    mockery.registerMock('retry-request', fakeRetryRequest);
+    mockery.registerMock('stream-forward', fakeStreamForward);
     mockery.enable({
       useCleanCache: true,
       warnOnUnregistered: false
     });
     util = require('../../lib/common/util');
-    var util_Cached = extend(true, {}, util);
+    var utilCached = extend(true, {}, util);
 
     // Override all util methods, allowing them to be mocked. Overrides are
     // removed before each test.
@@ -66,7 +81,7 @@ describe('common/util', function() {
       }
 
       util[utilMethod] = function() {
-        return (utilOverrides[utilMethod] || util_Cached[utilMethod])
+        return (utilOverrides[utilMethod] || utilCached[utilMethod])
           .apply(this, arguments);
       };
     });
@@ -78,8 +93,10 @@ describe('common/util', function() {
   });
 
   beforeEach(function() {
-    googleAuthLibrary_Override = null;
-    request_Override = null;
+    googleAuthLibraryOverride = null;
+    requestOverride = null;
+    retryRequestOverride = null;
+    streamForwardOverride = null;
     utilOverrides = {};
   });
 
@@ -97,22 +114,33 @@ describe('common/util', function() {
     assert.deepEqual(util.missingProjectIdError, missingProjectIdError);
   });
 
-  describe('arrayize', function() {
-    it('should arrayize if the input is not an array', function() {
-      assert.deepEqual(util.arrayize('text'), ['text']);
+  describe('ApiError', function() {
+    it('should build correct ApiError', function() {
+      var error = {
+        errors: [ new Error(), new Error() ],
+        code: 100,
+        message: 'Uh oh',
+        response: { a: 'b', c: 'd' }
+      };
+
+      var apiError = new util.ApiError(error);
+
+      assert.strictEqual(apiError.errors, error.errors);
+      assert.strictEqual(apiError.code, error.code);
+      assert.strictEqual(apiError.message, error.message);
+      assert.strictEqual(apiError.response, error.response);
     });
 
-    it('should return the same array if given an array', function() {
-      var arr = [1, 2, 3];
-      assert.deepEqual(util.arrayize(arr), arr);
-    });
+    it('should build ApiError with default status message', function() {
+      var error = {
+        errors: [],
+        code: 100,
+        response: { a: 'b', c: 'd' }
+      };
 
-    it('should return an empty array in correct circumstance', function() {
-      assert.deepEqual(util.arrayize(undefined), []);
-      assert.deepEqual(util.arrayize(null), []);
+      var apiError = new util.ApiError(error);
 
-      assert.deepEqual(util.arrayize(false), [false]);
-      assert.deepEqual(util.arrayize(0), [0]);
+      assert.strictEqual(apiError.message, 'Error during request.');
     });
   });
 
@@ -140,41 +168,101 @@ describe('common/util', function() {
 
   describe('handleResp', function() {
     it('should handle errors', function(done) {
-      var defaultErr = new Error('new error');
-      util.handleResp(defaultErr, null, null, function(err) {
-        assert.equal(err, defaultErr);
+      var error = new Error('Error.');
+
+      util.handleResp(error, {}, null, function(err) {
+        assert.strictEqual(err, error);
         done();
       });
     });
 
-    it('should handle body errors', function(done) {
+    it('should parse response', function(done) {
+      var err = { a: 'b', c: 'd' };
+      var resp = { a: 'b', c: 'd' };
+      var body = { a: 'b', c: 'd' };
+
+      var returnedErr = { a: 'b', c: 'd' };
+      var returnedBody = { a: 'b', c: 'd' };
+      var returnedResp = { a: 'b', c: 'd' };
+
+      utilOverrides.parseApiResp = function(err_, resp_, body_) {
+        assert.strictEqual(err_, err);
+        assert.strictEqual(resp_, resp);
+        assert.strictEqual(body_, body);
+
+        return {
+          err: returnedErr,
+          body: returnedBody,
+          resp: returnedResp
+        };
+      };
+
+      util.handleResp(err, resp, body, function(err, body, resp) {
+        assert.strictEqual(err, returnedErr);
+        assert.strictEqual(body, returnedBody);
+        assert.strictEqual(resp, returnedResp);
+        done();
+      });
+    });
+
+    it('should parse response for error', function(done) {
+      var error = new Error('Error.');
+
+      utilOverrides.parseApiResp = function() {
+        return { err: error };
+      };
+
+      util.handleResp(null, {}, {}, function(err) {
+        assert.strictEqual(err, error);
+        done();
+      });
+    });
+  });
+
+  describe('parseApiResp', function() {
+    describe('non-200s response status', function() {
+      it('should build ApiError with status and message', function(done) {
+        var error = { statusCode: 400, statusMessage: 'Not Good' };
+
+        utilOverrides.ApiError = function(error_) {
+          assert.strictEqual(error_.code, error.statusCode);
+          assert.strictEqual(error_.message, error.statusMessage);
+          assert.strictEqual(error_.response, error);
+
+          done();
+        };
+
+        util.parseApiResp(null, error);
+      });
+    });
+
+    it('should not throw when there is just an error', function() {
+      assert.doesNotThrow(function() {
+        var error = {};
+        util.parseApiResp(error);
+      });
+    });
+
+    it('should detect body errors', function() {
       var apiErr = {
         errors: [{ foo: 'bar' }],
         code: 400,
         message: 'an error occurred'
       };
-      util.handleResp(null, {}, { error: apiErr }, function(err) {
-        assert.deepEqual(err.errors, apiErr.errors);
-        assert.strictEqual(err.code, apiErr.code);
-        assert.deepEqual(err.message, apiErr.message);
-        done();
-      });
+
+      var parsedApiResp = util.parseApiResp(null, {}, { error: apiErr });
+
+      assert.deepEqual(parsedApiResp.err.errors, apiErr.errors);
+      assert.strictEqual(parsedApiResp.err.code, apiErr.code);
+      assert.deepEqual(parsedApiResp.err.message, apiErr.message);
     });
 
-    it('should try to parse JSON if body is string', function(done) {
+    it('should try to parse JSON if body is string', function() {
       var body = '{ "foo": "bar" }';
-      util.handleResp(null, {}, body, function(err, body) {
-        assert.strictEqual(body.foo, 'bar');
-        done();
-      });
-    });
 
-    it('should return err code if there are not other errors', function(done) {
-      util.handleResp(null, { statusCode: 400 }, null, function(err) {
-        assert.strictEqual(err.code, 400);
-        assert.strictEqual(err.message, 'Error during request.');
-        done();
-      });
+      var parsedApiResp = util.parseApiResp(null, {}, body);
+
+      assert.strictEqual(parsedApiResp.body.foo, 'bar');
     });
   });
 
@@ -219,7 +307,7 @@ describe('common/util', function() {
     it('should emit an error', function(done) {
       var error = new Error('Error.');
 
-      var ws = new stream.Writable();
+      var ws = through();
       ws.on('error', function(err) {
         assert.equal(err, error);
         done();
@@ -237,7 +325,7 @@ describe('common/util', function() {
       var boundary;
       var metadata = { a: 'b', c: 'd' };
 
-      request_Override = function() {
+      requestOverride = function() {
         var written = [];
 
         var req = duplexify();
@@ -285,7 +373,7 @@ describe('common/util', function() {
       var ws = new stream.Writable();
       ws.write = function() {};
 
-      request_Override = function() {
+      requestOverride = function() {
         return ws;
       };
 
@@ -306,7 +394,7 @@ describe('common/util', function() {
       var ws = new stream.Writable();
       ws.write = function() {};
 
-      request_Override = function() {
+      requestOverride = function() {
         return ws;
       };
 
@@ -321,13 +409,89 @@ describe('common/util', function() {
         }
       });
     });
+
+    it('should emit an error if the request fails', function(done) {
+      var dup = duplexify();
+      var fakeStream = new stream.Writable();
+      var error = new Error('Error.');
+
+      fakeStream.write = function() {};
+      dup.end = function() {};
+
+      utilOverrides.handleResp = function(err, res, body, callback) {
+        callback(error);
+      };
+
+      requestOverride = function() {
+        return fakeStream;
+      };
+
+      var options = {
+        makeAuthorizedRequest: function(request, opts) {
+          opts.onAuthorized();
+        }
+      };
+
+      util.makeWritableStream(dup, options);
+
+      dup.on('error', function(err) {
+        assert.strictEqual(err, error);
+        done();
+      });
+
+      setImmediate(function() {
+        fakeStream.emit('complete', {});
+      });
+    });
+
+    it('should pass back the response data to the callback', function(done) {
+      var dup = duplexify();
+      var fakeStream = new stream.Writable();
+      var fakeResponse = {};
+
+      fakeStream.write = function() {};
+
+      utilOverrides.handleResp = function(err, res, body, callback) {
+        callback(null, fakeResponse);
+      };
+
+      requestOverride = function() {
+        return fakeStream;
+      };
+
+      var options = {
+        makeAuthorizedRequest: function(request, opts) {
+          opts.onAuthorized();
+        }
+      };
+
+      util.makeWritableStream(dup, options, function(data) {
+        assert.strictEqual(data, fakeResponse);
+        done();
+      });
+
+      setImmediate(function() {
+        fakeStream.emit('complete', {});
+      });
+    });
   });
 
   describe('getAuthClient', function() {
+    it('should use any authClient provided as a config', function(done) {
+      var config = {
+        authClient: {}
+      };
+
+      util.getAuthClient(config, function(err, authClient) {
+        assert.strictEqual(authClient, config.authClient);
+        done();
+      });
+    });
+
     it('should use google-auth-library', function() {
       var googleAuthLibraryCalled = false;
 
-      googleAuthLibrary_Override = function() {
+      googleAuthLibraryOverride = function() {
         googleAuthLibraryCalled = true;
         return {
           getApplicationDefault: util.noop
@@ -342,7 +506,7 @@ describe('common/util', function() {
     it('should create a JWT auth client from a keyFile', function(done) {
       var jwt = {};
 
-      googleAuthLibrary_Override = function() {
+      googleAuthLibraryOverride = function() {
         return {
           JWT: function() { return jwt; }
         };
@@ -370,7 +534,7 @@ describe('common/util', function() {
     it('should create an auth client from credentials', function(done) {
       var credentialsSet;
 
-      googleAuthLibrary_Override = function() {
+      googleAuthLibraryOverride = function() {
         return {
           fromJSON: function(credentials, callback) {
             credentialsSet = credentials;
@@ -390,7 +554,7 @@ describe('common/util', function() {
     });
 
     it('should create an auth client from magic', function(done) {
-      googleAuthLibrary_Override = function() {
+      googleAuthLibraryOverride = function() {
         return {
           getApplicationDefault: function(callback) {
             callback(null, {});
@@ -417,7 +581,7 @@ describe('common/util', function() {
         getAccessToken: function() {}
       };
 
-      googleAuthLibrary_Override = function() {
+      googleAuthLibraryOverride = function() {
         return {
           getApplicationDefault: function(callback) {
             callback(null, fakeAuthClient);
@@ -426,6 +590,23 @@ describe('common/util', function() {
       };
 
       util.getAuthClient(config, done);
+    });
+
+    it('should pass back any errors from the authClient', function(done) {
+      var error = new Error('Error!');
+
+      googleAuthLibraryOverride = function() {
+        return {
+          getApplicationDefault: function(callback) {
+            callback(error);
+          }
+        };
+      };
+
+      util.getAuthClient({}, function(err) {
+        assert.strictEqual(error, err);
+        done();
+      });
     });
   });
 
@@ -553,6 +734,17 @@ describe('common/util', function() {
         });
       });
 
+      it('should decorate the request', function(done) {
+        var reqOpts = { a: 'b', c: 'd' };
+
+        utilOverrides.decorateRequest = function(reqOpts_) {
+          assert.strictEqual(reqOpts_, reqOpts);
+          done();
+        };
+
+        makeAuthorizedRequest(reqOpts, { onAuthorized: assert.ifError });
+      });
+
       it('should pass options back to onAuthorized callback', function(done) {
         var reqOpts = { a: 'b', c: 'd' };
 
@@ -589,7 +781,28 @@ describe('common/util', function() {
         };
 
         var makeAuthorizedRequest = util.makeAuthorizedRequestFactory(config);
-        makeAuthorizedRequest(reqOpts);
+        makeAuthorizedRequest(reqOpts, {});
+      });
+
+      it('should return a stream if callback is missing', function() {
+        utilOverrides.authorizeRequest = function() {};
+
+        var makeAuthorizedRequest = util.makeAuthorizedRequestFactory({});
+        assert(makeAuthorizedRequest({}) instanceof stream.Stream);
+      });
+
+      it('should provide stream to authorizeRequest', function(done) {
+        var stream;
+
+        utilOverrides.authorizeRequest = function(cfg) {
+          setImmediate(function() {
+            assert.strictEqual(cfg.stream, stream);
+            done();
+          });
+        };
+
+        var makeAuthorizedRequest = util.makeAuthorizedRequestFactory();
+        stream = makeAuthorizedRequest();
       });
 
       describe('authorization errors', function() {
@@ -597,14 +810,16 @@ describe('common/util', function() {
 
         beforeEach(function() {
           utilOverrides.authorizeRequest = function(cfg, rOpts, callback) {
-            callback(error);
+            setImmediate(function() {
+              callback(error);
+            });
           };
         });
 
         it('should invoke the callback with error', function(done) {
           var makeAuthorizedRequest = util.makeAuthorizedRequestFactory();
           makeAuthorizedRequest({}, function(err) {
-            assert.deepEqual(err, error);
+            assert.strictEqual(err, error);
             done();
           });
         });
@@ -613,9 +828,22 @@ describe('common/util', function() {
           var makeAuthorizedRequest = util.makeAuthorizedRequestFactory();
           makeAuthorizedRequest({}, {
             onAuthorized: function(err) {
-              assert.deepEqual(err, error);
+              assert.strictEqual(err, error);
               done();
             }
+          });
+        });
+
+        it('should emit an error and end the stream', function(done) {
+          var makeAuthorizedRequest = util.makeAuthorizedRequestFactory();
+          makeAuthorizedRequest({}).on('error', function(err) {
+            assert.strictEqual(err, error);
+
+            var stream = this;
+            setImmediate(function() {
+              assert.strictEqual(stream._destroyed, true);
+              done();
+            });
           });
         });
       });
@@ -623,15 +851,22 @@ describe('common/util', function() {
       describe('authorization success', function() {
         var reqOpts = { a: 'b', c: 'd' };
 
-        it('should return the authorized request to callback', function(done) {
+        beforeEach(function() {
           utilOverrides.authorizeRequest = function(cfg, rOpts, callback) {
             callback(null, rOpts);
+          };
+        });
+
+        it('should return the authorized request to callback', function(done) {
+          utilOverrides.decorateRequest = function(reqOpts_) {
+            assert.strictEqual(reqOpts_, reqOpts);
+            return reqOpts;
           };
 
           var makeAuthorizedRequest = util.makeAuthorizedRequestFactory();
           makeAuthorizedRequest(reqOpts, {
             onAuthorized: function(err, authorizedReqOpts) {
-              assert.deepEqual(authorizedReqOpts, reqOpts);
+              assert.strictEqual(authorizedReqOpts, reqOpts);
               done();
             }
           });
@@ -640,18 +875,33 @@ describe('common/util', function() {
         it('should make request with correct options', function(done) {
           var config = { a: 'b', c: 'd' };
 
-          utilOverrides.authorizeRequest = function(cfg, rOpts, callback) {
-            callback(null, rOpts);
+          utilOverrides.decorateRequest = function(reqOpts_) {
+            assert.strictEqual(reqOpts_, reqOpts);
+            return reqOpts;
           };
 
           utilOverrides.makeRequest = function(authorizedReqOpts, cfg, cb) {
-            assert.deepEqual(authorizedReqOpts, reqOpts);
+            assert.strictEqual(authorizedReqOpts, reqOpts);
             assert.deepEqual(cfg, config);
             cb();
           };
 
           var makeAuthorizedRequest = util.makeAuthorizedRequestFactory(config);
           makeAuthorizedRequest(reqOpts, done);
+        });
+
+        it('should provide stream to makeRequest', function(done) {
+          var stream;
+
+          utilOverrides.makeRequest = function(authorizedReqOpts, cfg) {
+            setImmediate(function() {
+              assert.strictEqual(cfg.stream, stream);
+              done();
+            });
+          };
+
+          var makeAuthorizedRequest = util.makeAuthorizedRequestFactory({});
+          stream = makeAuthorizedRequest(reqOpts);
         });
       });
     });
@@ -764,26 +1014,6 @@ describe('common/util', function() {
     });
   });
 
-  describe('prop', function() {
-    it('should return objects that match the property name', function() {
-      var people = [
-        { name: 'Stephen', origin: 'USA', beenToNYC: false },
-        { name: 'Ryan', origin: 'Canada', beenToNYC: true }
-      ];
-
-      assert.deepEqual(people.map(util.prop('name')), ['Stephen', 'Ryan']);
-      assert.deepEqual(people.filter(util.prop('beenToNYC')), [people[1]]);
-    });
-  });
-
-  describe('propAssign', function() {
-    it('should assign a property and value to an object', function() {
-      var obj = {};
-      util.propAssign('prop', 'value')(obj);
-      assert.equal(obj.prop, 'value');
-    });
-  });
-
   describe('shouldRetryRequest', function() {
     it('should return false if there is no error', function() {
       assert.strictEqual(util.shouldRetryRequest(), false);
@@ -805,6 +1035,13 @@ describe('common/util', function() {
     it('should return true with error code 500', function() {
       var error = new Error('500');
       error.code = 500;
+
+      assert.strictEqual(util.shouldRetryRequest(error), true);
+    });
+
+    it('should return true with error code 502', function() {
+      var error = new Error('502');
+      error.code = 502;
 
       assert.strictEqual(util.shouldRetryRequest(error), true);
     });
@@ -831,179 +1068,188 @@ describe('common/util', function() {
     });
   });
 
-  describe('getNextRetryWait', function() {
-    function secs(seconds) {
-      return seconds * 1000;
-    }
-
-    it('should return exponential retry delay', function() {
-      [1, 2, 3, 4, 5].forEach(assertTime);
-
-      function assertTime(retryNumber) {
-        var min = (Math.pow(2, retryNumber) * secs(1));
-        var max = (Math.pow(2, retryNumber) * secs(1)) + secs(1);
-
-        var time = util.getNextRetryWait(retryNumber);
-
-        assert(time >= min && time <= max);
-      }
-    });
-  });
-
   describe('makeRequest', function() {
-    var PKG = require('../../package.json');
-    var USER_AGENT = 'gcloud-node/' + PKG.version;
     var reqOpts = { a: 'b', c: 'd' };
-    var expectedReqOpts = extend(true, {}, reqOpts, {
-      headers: {
-        'User-Agent': USER_AGENT
-      }
-    });
 
-    it('should make a request', function(done) {
-      request_Override = function() {
-        done();
-      };
+    function testDefaultRetryRequestConfig(done) {
+      return function(reqOpts_, config) {
+        assert.strictEqual(reqOpts_, reqOpts);
+        assert.equal(config.retries, 3);
+        assert.strictEqual(config.request, fakeRequest);
 
-      util.makeRequest({}, assert.ifError, {});
-    });
-
-    it('should add the user agent', function(done) {
-      request_Override = function(rOpts) {
-        assert.deepEqual(rOpts, expectedReqOpts);
-        done();
-      };
-
-      util.makeRequest(reqOpts, assert.ifError, {});
-    });
-
-    it('should let handleResp handle the response', function(done) {
-      var error = new Error('Error.');
-      var response = { a: 'b', c: 'd' };
-      var body = response.a;
-
-      request_Override = function(rOpts, callback) {
-        callback(error, response, body);
-      };
-
-      utilOverrides.handleResp = function(err, resp, bdy) {
-        assert.deepEqual(err, error);
-        assert.deepEqual(resp, response);
-        assert.deepEqual(bdy, body);
-        done();
-      };
-
-      util.makeRequest({}, {}, assert.ifError);
-    });
-
-    describe('request errors', function() {
-      describe('non-rate limit error', function() {
-        it('should return error to callback', function(done) {
-          var nonRateLimitError = new Error('Error.');
-
-          request_Override = function(reqOpts, callback) {
-            callback(nonRateLimitError);
-          };
-
-          util.makeRequest({}, {}, function(err) {
-            assert.deepEqual(err, nonRateLimitError);
-            done();
-          });
-        });
-      });
-
-      describe('rate limit errors', function() {
-        var rateLimitError = new Error('Rate limit error.');
-        rateLimitError.code = 500;
-
-        beforeEach(function() {
-          // Always return a rate limit error.
-          request_Override = function (reqOpts, callback) {
-            callback(rateLimitError);
-          };
-
-          // Always suggest retrying.
-          utilOverrides.shouldRetryRequest = function() {
-            return true;
-          };
-
-          // Always return a 0 retry wait.
-          utilOverrides.getNextRetryWait = function() {
-            return 0;
-          };
-        });
-
-        it('should check with shouldRetryRequest', function(done) {
-          utilOverrides.shouldRetryRequest = function() {
-            done();
-          };
-
-          util.makeRequest({}, {}, util.noop);
-        });
-
-        it('should default to 3 retries', function(done) {
-          var attempts = 0;
-          var expectedAttempts = 4; // the original request + 3 retries
-
-          utilOverrides.handleResp = function(err, resp, body, callback) {
-            attempts++;
-            callback(err);
-          };
-
-          util.makeRequest({}, {}, function(err) {
-            assert.equal(err, rateLimitError);
-            assert.equal(attempts, expectedAttempts);
-            done();
-          });
-        });
-
-        it('should allow max retries to be specified', function(done) {
-          var attempts = 0;
-          var maxRetries = 5;
-          var expectedAttempts = maxRetries + 1; // the original req
-
-          utilOverrides.handleResp = function(err, resp, body, callback) {
-            attempts++;
-            callback(err);
-          };
-
-          util.makeRequest({}, { maxRetries: maxRetries }, function(err) {
-            assert.equal(err, rateLimitError);
-            assert.equal(attempts, expectedAttempts);
-            done();
-          });
-        });
-
-        it('should not retry reqs if autoRetry is false', function(done) {
-          var attempts = 0;
-          var expectedAttempts = 1; // the original req
-
-          utilOverrides.handleResp = function(err, resp, body, callback) {
-            attempts++;
-            callback(err);
-          };
-
-          util.makeRequest({}, { autoRetry: false }, function(err) {
-            assert.equal(err, rateLimitError);
-            assert.equal(attempts, expectedAttempts);
-            done();
-          });
-        });
-      });
-    });
-
-    describe('request success', function() {
-      it('should let handleResp handle response', function(done) {
-        utilOverrides.handleResp = function() {
+        var error = new Error('Error.');
+        utilOverrides.parseApiResp = function() {
+          return { err: error };
+        };
+        utilOverrides.shouldRetryRequest = function(err) {
+          assert.strictEqual(err, error);
           done();
         };
 
-        request_Override = function(reqOpts, callback) {
-          callback();
+        config.shouldRetryFn();
+      };
+    }
+
+    var noRetryRequestConfig = { autoRetry: false };
+    function testNoRetryRequestConfig(done) {
+      return function(reqOpts, config) {
+        assert.strictEqual(config.retries, 0);
+        done();
+      };
+    }
+
+    var customRetryRequestConfig = { maxRetries: 10 };
+    function testCustomRetryRequestConfig(done) {
+      return function(reqOpts, config) {
+        assert.strictEqual(config.retries, customRetryRequestConfig.maxRetries);
+        done();
+      };
+    }
+
+    describe('stream mode', function() {
+      it('should pass the default options to retryRequest', function(done) {
+        retryRequestOverride = testDefaultRetryRequestConfig(done);
+        util.makeRequest(reqOpts, {});
+      });
+
+      it('should expose the abort method from retryRequest', function(done) {
+        var userStream = new stream.Stream();
+
+        retryRequestOverride = function() {
+          var requestStream = new stream.Stream();
+          requestStream.abort = done;
+          return requestStream;
+        };
+
+        util.makeRequest(reqOpts, { stream: userStream });
+        userStream.abort();
+      });
+
+      it('should allow turning off retries to retryRequest', function(done) {
+        retryRequestOverride = testNoRetryRequestConfig(done);
+        util.makeRequest(reqOpts, noRetryRequestConfig);
+      });
+
+      it('should override number of retries to retryRequest', function(done) {
+        retryRequestOverride = testCustomRetryRequestConfig(done);
+        util.makeRequest(reqOpts, customRetryRequestConfig);
+      });
+
+      it('should forward the specified events to the stream', function(done) {
+        var requestStream = new stream.Stream();
+        var userStream = new stream.Stream();
+
+        retryRequestOverride = function() {
+          return requestStream;
+        };
+
+        streamForwardOverride = function(stream_) {
+          assert.strictEqual(stream_, requestStream);
+          done();
+          return stream_;
+        };
+
+        util.makeRequest(reqOpts, { stream: userStream });
+      });
+    });
+
+    describe('callback mode', function() {
+      it('should optionally accept config', function(done) {
+        retryRequestOverride = testDefaultRetryRequestConfig(done);
+        util.makeRequest(reqOpts, assert.ifError);
+      });
+
+      it('should pass the default options to retryRequest', function(done) {
+        retryRequestOverride = testDefaultRetryRequestConfig(done);
+        util.makeRequest(reqOpts, {}, assert.ifError);
+      });
+
+      it('should allow turning off retries to retryRequest', function(done) {
+        retryRequestOverride = testNoRetryRequestConfig(done);
+        util.makeRequest(reqOpts, noRetryRequestConfig, assert.ifError);
+      });
+
+      it('should override number of retries to retryRequest', function(done) {
+        retryRequestOverride = testCustomRetryRequestConfig(done);
+        util.makeRequest(reqOpts, customRetryRequestConfig, assert.ifError);
+      });
+
+      it('should let handleResp handle the response', function(done) {
+        var error = new Error('Error.');
+        var response = { a: 'b', c: 'd' };
+        var body = response.a;
+
+        requestOverride = function(rOpts, callback) {
+          callback(error, response, body);
+        };
+
+        utilOverrides.handleResp = function(err, resp, body_) {
+          assert.strictEqual(err, error);
+          assert.strictEqual(resp, response);
+          assert.strictEqual(body_, body);
+          done();
         };
 
         util.makeRequest({}, {}, assert.ifError);
       });
+    });
+  });
+
+  describe('decorateRequest', function() {
+    it('should add the user agent', function() {
+      var PKG = require('../../package.json');
+      var USER_AGENT = 'gcloud-node/' + PKG.version;
+
+      var reqOpts = { a: 'b', c: 'd' };
+
+      var expectedReqOpts = extend({}, reqOpts, {
+        headers: {
+          'User-Agent': USER_AGENT
+        }
+      });
+
+      var decoratedReqOpts = util.decorateRequest(reqOpts);
+      assert.deepEqual(decoratedReqOpts, expectedReqOpts);
+    });
+
+    it('should delete qs.autoPaginate', function() {
+      var decoratedReqOpts = util.decorateRequest({
+        qs: {
+          autoPaginate: true
+        }
+      });
+
+      assert.strictEqual(decoratedReqOpts.autoPaginate, undefined);
+    });
+
+    it('should delete qs.autoPaginateVal', function() {
+      var decoratedReqOpts = util.decorateRequest({
+        qs: {
+          autoPaginateVal: true
+        }
+      });
+
+      assert.strictEqual(decoratedReqOpts.autoPaginate, undefined);
+    });
+
+    it('should delete json.autoPaginate', function() {
+      var decoratedReqOpts = util.decorateRequest({
+        json: {
+          autoPaginate: true
+        }
+      });
+
+      assert.strictEqual(decoratedReqOpts.autoPaginate, undefined);
+    });
+
+    it('should delete json.autoPaginateVal', function() {
+      var decoratedReqOpts = util.decorateRequest({
+        json: {
+          autoPaginateVal: true
+        }
+      });
+
+      assert.strictEqual(decoratedReqOpts.autoPaginate, undefined);
     });
   });
 });

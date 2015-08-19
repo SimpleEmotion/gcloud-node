@@ -77,14 +77,32 @@ describe('pubsub', function() {
       });
     });
 
-    it('should return a nextQuery if there are more results', function(done) {
+    it('should list topics in a stream', function(done) {
+      var topicsEmitted = [];
+
+      pubsub.getTopics()
+        .on('error', done)
+        .on('data', function(topic) {
+          topicsEmitted.push(topic);
+        })
+        .on('end', function() {
+          var results = topicsEmitted.filter(function(topic) {
+            return TOPIC_FULL_NAMES.indexOf(topic.name) !== -1;
+          });
+
+          assert.equal(results.length, TOPIC_NAMES.length);
+          done();
+        });
+    });
+
+    it('should allow manual paging', function(done) {
       pubsub.getTopics({
         pageSize: TOPIC_NAMES.length - 1
-      }, function(err, topics, next) {
+      }, function(err, topics, nextQuery) {
         assert.ifError(err);
         assert(topics.length, TOPIC_NAMES.length - 1);
-        assert(next.pageSize, TOPIC_NAMES.length - 1);
-        assert(!!next.pageToken, true);
+        assert(nextQuery.pageSize, TOPIC_NAMES.length - 1);
+        assert(!!nextQuery.pageToken, true);
         done();
       });
     });
@@ -97,30 +115,20 @@ describe('pubsub', function() {
       });
     });
 
-    it('should lazily create by default', function(done) {
-      var newTopicName = generateTopicName();
-      var newTopic = pubsub.topic(newTopicName);
-
-      newTopic.publish({ data: 'message from me' }, function(err) {
-        assert.ifError(err);
-
-        pubsub.getTopics(function(err, topics) {
-          assert.ifError(err);
-
-          assert(topics.some(function(topic) {
-            return topic.name.indexOf(newTopicName) > -1;
-          }));
-
-          newTopic.delete(done);
-        });
-      });
-    });
-
     it('should publish a message', function(done) {
       var topic = pubsub.topic(TOPIC_NAMES[0]);
       topic.publish({ data: 'message from me' }, function(err, messageIds) {
         assert.ifError(err);
         assert.equal(messageIds.length, 1);
+        done();
+      });
+    });
+
+    it('should get the metadata of a topic', function(done) {
+      var topic = pubsub.topic(TOPIC_NAMES[0]);
+      topic.getMetadata(function(err, metadata) {
+        assert.ifError(err);
+        assert.strictEqual(metadata.name, topic.name);
         done();
       });
     });
@@ -148,15 +156,24 @@ describe('pubsub', function() {
     var topic;
 
     before(function(done) {
-      // Create a new test topic.
       pubsub.createTopic(TOPIC_NAME, function(err, newTopic) {
         assert.ifError(err);
         topic = newTopic;
 
-        // Create subscriptions.
-        async.parallel(SUBSCRIPTIONS.map(function(sub) {
-          return topic.subscribe.bind(topic, sub.name, sub.options);
-        }), done);
+        function createSubscription(subscription, callback) {
+          topic.subscribe(subscription.name, subscription.options, callback);
+        }
+
+        async.each(SUBSCRIPTIONS, createSubscription, function(err) {
+          if (err) {
+            done(err);
+            return;
+          }
+
+          async.times(10, function(_, next) {
+            topic.publish({ data: 'hello' }, next);
+          }, done);
+        });
       });
     });
 
@@ -183,12 +200,40 @@ describe('pubsub', function() {
       });
     });
 
+    it('should list all topic subscriptions as a stream', function(done) {
+      var subscriptionsEmitted = [];
+
+      topic.getSubscriptions()
+        .on('error', done)
+        .on('data', function(subscription) {
+          subscriptionsEmitted.push(subscription);
+        })
+        .on('end', function() {
+          assert.equal(subscriptionsEmitted.length, SUBSCRIPTIONS.length);
+          done();
+        });
+    });
+
     it('should list all subscriptions regardless of topic', function(done) {
       pubsub.getSubscriptions(function(err, subscriptions) {
         assert.ifError(err);
         assert(subscriptions instanceof Array);
         done();
       });
+    });
+
+    it('should list all subscriptions as a stream', function(done) {
+      var subscriptionEmitted = false;
+
+      pubsub.getSubscriptions()
+        .on('error', done)
+        .on('data', function(subscription) {
+          subscriptionEmitted = subscription instanceof Subscription;
+        })
+        .on('end', function() {
+          assert.strictEqual(subscriptionEmitted, true);
+          done();
+        });
     });
 
     it('should allow creation and deletion of a subscription', function(done) {
@@ -212,126 +257,114 @@ describe('pubsub', function() {
     it('should be able to pull and ack', function(done) {
       var subscription = topic.subscription(SUB_NAMES[0]);
 
-      topic.publish({ data: 'hello' }, function(err) {
+      subscription.pull({
+        returnImmediately: true,
+        maxResults: 1
+      }, function(err, msgs) {
         assert.ifError(err);
 
-        subscription.pull({
-          returnImmediately: false,
-          maxResults: 1
-        }, function(err, msgs) {
-          assert.ifError(err);
-          subscription.ack(msgs[0].ackId, done);
-        });
+        assert.strictEqual(msgs.length, 1);
+
+        subscription.ack(msgs[0].ackId, done);
       });
     });
 
     it('should be able to set a new ack deadline', function(done) {
       var subscription = topic.subscription(SUB_NAMES[0]);
 
-      topic.publish({ data: 'hello' }, function(err) {
+      subscription.pull({
+        returnImmediately: true,
+        maxResults: 1
+      }, function(err, msgs) {
         assert.ifError(err);
 
-        subscription.pull({
-          returnImmediately: false,
-          maxResults: 1
-        }, function(err, msgs) {
-          assert.ifError(err);
+        assert.strictEqual(msgs.length, 1);
 
-          var options = {
-            ackId: msgs[0].ackId,
-            seconds: 10
-          };
-          subscription.setAckDeadline(options, done);
-        });
+        var options = {
+          ackIds: [msgs[0].ackId],
+          seconds: 10
+        };
+
+        subscription.setAckDeadline(options, done);
       });
     });
 
     it('should receive the published message', function(done) {
       var subscription = topic.subscription(SUB_NAMES[1]);
 
-      topic.publish([
-        { data: 'hello' },
-        { data: 'hello' },
-        { data: 'hello' },
-        { data: 'hello' },
-        { data: 'hello' },
-        { data: 'hello' },
-        { data: 'hello' },
-        { data: 'hello' },
-        { data: 'hello' },
-        { data: 'hello' }
-      ], function(err) {
+      subscription.pull({
+        returnImmediately: true,
+        maxResults: 1
+      }, function(err, msgs) {
         assert.ifError(err);
-
-        subscription.pull({
-          returnImmediately: false,
-          maxResults: 1
-        }, function(err, msgs) {
-          assert.ifError(err);
-          assert.equal(msgs[0].data, 'hello');
-          subscription.ack(msgs[0].ackId, done);
-        });
-      });
-    });
-
-    it('should receive a raw published message', function(done) {
-      var subscription = topic.subscription(SUB_NAMES[0]);
-
-      topic.publish([
-        { data: 'hello' },
-        { data: 'hello' },
-        { data: 'hello' },
-        { data: 'hello' },
-        { data: 'hello' },
-        { data: 'hello' },
-        { data: 'hello' },
-        { data: 'hello' },
-        { data: 'hello' },
-        { data: 'hello' }
-      ], function(err) {
-        assert.ifError(err);
-
-        subscription.pull({
-          returnImmediately: false,
-          maxResults: 1
-        }, function(err, msgs) {
-          assert.ifError(err);
-          assert.equal(msgs[0].data, 'hello');
-          subscription.ack(msgs[0].ackId, done);
-        });
+        assert.strictEqual(msgs.length, 1);
+        assert.equal(msgs[0].data, 'hello');
+        subscription.ack(msgs[0].ackId, done);
       });
     });
 
     it('should receive the chosen amount of results', function(done) {
       var subscription = topic.subscription(SUB_NAMES[1]);
-      var opts = { returnImmediately: false, maxResults: 3 };
+      var opts = { returnImmediately: true, maxResults: 3 };
 
-      topic.publish([
-        { data: 'hello' },
-        { data: 'hello' },
-        { data: 'hello' },
-        { data: 'hello' },
-        { data: 'hello' },
-        { data: 'hello' },
-        { data: 'hello' },
-        { data: 'hello' },
-        { data: 'hello' },
-        { data: 'hello' }
-      ], function(err) {
+      subscription.pull(opts, function(err, messages) {
         assert.ifError(err);
 
-        subscription.pull(opts, function(err, messages) {
-          assert.ifError(err);
+        assert.equal(messages.length, opts.maxResults);
 
-          assert.equal(messages.length, opts.maxResults);
-
-          var ackIds = messages.map(function(message) {
-            return message.ackId;
-          });
-
-          subscription.ack(ackIds, done);
+        var ackIds = messages.map(function(message) {
+          return message.ackId;
         });
+
+        subscription.ack(ackIds, done);
       });
     });
+  });
+
+  describe('IAM', function() {
+
+    it('should get a policy', function(done) {
+      var topic = pubsub.topic(TOPIC_NAMES[0]);
+
+      topic.iam.getPolicy(function(err, policy) {
+        assert.ifError(err);
+        assert.deepEqual(policy, { etag: 'ACAB' });
+        done();
+      });
+    });
+
+    it('should set a policy', function(done) {
+      var topic = pubsub.topic(TOPIC_NAMES[0]);
+      var policy = {
+        bindings: [{
+          role: 'roles/pubsub.publisher',
+          members: ['serviceAccount:gmail-api-push@system.gserviceaccount.com']
+        }]
+      };
+
+      topic.iam.setPolicy(policy, function(err, newPolicy) {
+        assert.ifError(err);
+        assert.deepEqual(newPolicy.bindings, policy.bindings);
+        done();
+      });
+    });
+
+    it('should test the iam permissions', function(done) {
+      var topic = pubsub.topic(TOPIC_NAMES[0]);
+      var testPermissions = [
+        'pubsub.topics.get',
+        'pubsub.topics.update'
+      ];
+
+      topic.iam.testPermissions(testPermissions, function(err, permissions) {
+        assert.ifError(err);
+        assert.deepEqual(permissions, {
+          'pubsub.topics.get': true,
+          'pubsub.topics.update': true
+        });
+        done();
+      });
+    });
+
   });
 });

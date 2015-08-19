@@ -18,6 +18,7 @@
 
 'use strict';
 
+var arrify = require('arrify');
 var assert = require('assert');
 var crypto = require('crypto');
 var extend = require('extend');
@@ -30,13 +31,27 @@ function FakeFile(a, b) {
   File.call(this, a, b);
 }
 
-var makeWritableStream_Override;
+var makeWritableStreamOverride;
 var fakeUtil = extend({}, util, {
   makeWritableStream: function() {
     var args = [].slice.call(arguments);
-    (makeWritableStream_Override || util.makeWritableStream).apply(null, args);
+    (makeWritableStreamOverride || util.makeWritableStream).apply(null, args);
   }
 });
+
+var extended = false;
+var fakeStreamRouter = {
+  extend: function(Class, methods) {
+    if (Class.name !== 'Table') {
+      return;
+    }
+
+    methods = arrify(methods);
+    assert.equal(Class.name, 'Table');
+    assert.deepEqual(methods, ['getRows']);
+    extended = true;
+  }
+};
 
 describe('BigQuery/Table', function() {
   var DATASET = {
@@ -66,6 +81,7 @@ describe('BigQuery/Table', function() {
 
   before(function() {
     mockery.registerMock('../storage/file', FakeFile);
+    mockery.registerMock('../common/stream-router.js', fakeStreamRouter);
     mockery.registerMock('../common/util', fakeUtil);
     mockery.enable({
       useCleanCache: true,
@@ -80,8 +96,14 @@ describe('BigQuery/Table', function() {
   });
 
   beforeEach(function() {
-    makeWritableStream_Override = null;
+    makeWritableStreamOverride = null;
     table = new Table(DATASET, TABLE_ID);
+  });
+
+  describe('instantiation', function() {
+    it('should extend the correct methods', function() {
+      assert(extended); // See `fakeStreamRouter.extend`
+    });
   });
 
   describe('createSchemaFromString_', function() {
@@ -234,91 +256,15 @@ describe('BigQuery/Table', function() {
   });
 
   describe('createReadStream', function() {
-    it('should return a stream', function() {
-      assert(table.createReadStream() instanceof stream.Stream);
-    });
+    it('should return table.getRows()', function() {
+      var uniqueReturnValue = 'abc123';
 
-    it('should call getRows() when asked for data', function(done) {
       table.getRows = function() {
-        done();
-      };
-      table.createReadStream().emit('reading');
-    });
-
-    it('should emit rows', function(done) {
-      var rows = [{ a: 'b' }, { c: 'd' }];
-      var rowsEmitted = 0;
-
-      table.getRows = function(handler) {
-        handler(null, rows);
+        assert.equal(arguments.length, 0);
+        return uniqueReturnValue;
       };
 
-      table.createReadStream()
-        .on('data', function(row) {
-          assert.deepEqual(row, rows[rowsEmitted]);
-          rowsEmitted++;
-        })
-        .on('end', function() {
-          assert.equal(rowsEmitted, rows.length);
-          done();
-        });
-    });
-
-    it('should call getRows() if nextQuery exists', function(done) {
-      var called = 0;
-
-      var nextQuery = { a: 'b', c: 'd' };
-      var responseHandler;
-
-      table.getRows = function(query, handler) {
-        responseHandler = responseHandler || handler || query;
-
-        called++;
-
-        if (called === 2) {
-          assert.deepEqual(query, nextQuery);
-          assert.equal(responseHandler, handler);
-          done();
-        } else {
-          responseHandler(null, [], nextQuery);
-        }
-      };
-
-      table.createReadStream().emit('reading');
-    });
-
-    it('should end the stream when nextQuery is not present', function(done) {
-      table.getRows = function(handler) {
-        handler(null, []);
-      };
-
-      table.createReadStream().on('finish', done).emit('reading');
-    });
-
-    describe('errors', function() {
-      var error = new Error('Error.');
-
-      beforeEach(function() {
-        table.getRows = function(handler) {
-          handler(error);
-        };
-      });
-
-      it('should emit errors', function(done) {
-        table.createReadStream()
-          .once('error', function(err) {
-            assert.equal(err, error);
-            done();
-          })
-          .emit('reading');
-      });
-
-      it('should end the stream', function(done) {
-        table.createReadStream()
-          .once('error', util.noop)
-          .once('finish', done)
-          .emit('reading');
-      });
+      assert.equal(table.createReadStream(), uniqueReturnValue);
     });
   });
 
@@ -326,7 +272,7 @@ describe('BigQuery/Table', function() {
     it('should use a string as the file type', function(done) {
       var fileType = 'csv';
 
-      makeWritableStream_Override = function(stream, options) {
+      makeWritableStreamOverride = function(stream, options) {
         var load = options.metadata.configuration.load;
         assert.equal(load.sourceFormat, 'CSV');
         done();
@@ -360,7 +306,7 @@ describe('BigQuery/Table', function() {
       it('should make a writable stream when written to', function(done) {
         var stream;
 
-        makeWritableStream_Override = function(s) {
+        makeWritableStreamOverride = function(s) {
           assert.equal(s, stream);
           done();
         };
@@ -370,7 +316,7 @@ describe('BigQuery/Table', function() {
       });
 
       it('should pass the connection', function(done) {
-        makeWritableStream_Override = function(stream, options) {
+        makeWritableStreamOverride = function(stream, options) {
           assert.deepEqual(options.connection, table.connection);
           done();
         };
@@ -379,7 +325,7 @@ describe('BigQuery/Table', function() {
       });
 
       it('should pass extended metadata', function(done) {
-        makeWritableStream_Override = function(stream, options) {
+        makeWritableStreamOverride = function(stream, options) {
           assert.deepEqual(options.metadata, {
             configuration: {
               load: {
@@ -400,7 +346,7 @@ describe('BigQuery/Table', function() {
       });
 
       it('should pass the correct request uri', function(done) {
-        makeWritableStream_Override = function(stream, options) {
+        makeWritableStreamOverride = function(stream, options) {
           var uri = 'https://www.googleapis.com/upload/bigquery/v2/projects/' +
             table.bigQuery.projectId + '/jobs';
           assert.equal(options.request.uri, uri);
@@ -418,7 +364,7 @@ describe('BigQuery/Table', function() {
           return { id: id };
         };
 
-        makeWritableStream_Override = function(stream, options, callback) {
+        makeWritableStreamOverride = function(stream, options, callback) {
           callback(metadata);
         };
 
